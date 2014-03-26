@@ -7,6 +7,63 @@ using namespace std;
 using namespace cv;
 #define DEBUG 1
 
+// the image width is 3*n
+IplImage * cropImageToSquare3(IplImage * src, CvPoint tlPoint, CvPoint trPoint, CvPoint blPoint, CvPoint brPoint)
+{
+	double dx1 =  (trPoint.x + brPoint.x)/2.0 - (tlPoint.x + blPoint.x)/2.0;
+	double dy1 =  (trPoint.y + brPoint.y)/2.0 - (tlPoint.y + blPoint.y)/2.0;
+	double dx2 = (tlPoint.x + trPoint.x)/2.0 - (blPoint.x + brPoint.x)/2.0;
+	double dy2 = (tlPoint.y + trPoint.y)/2.0 - (blPoint.y + brPoint.y)/2.0;
+	int width = sqrt(dx1*dx1 + dy1*dy1) + 0.5;
+	int height = sqrt(dx2*dx2 + dy2*dy2) + 0.5;
+	width = (width + height)/2.0;
+	width = width - width % 3;
+	height = width;
+	IplImage * dst = cvCreateImage(cvSize(width, height), IPL_DEPTH_8U, src->nChannels);
+	int nchannels = src->nChannels;
+	Point2f srcPoints[4];
+	Point2f dstPoints[4];
+	
+	srcPoints[0].x = 0;           dstPoints[0].x = tlPoint.x;
+	srcPoints[0].y = 0;           dstPoints[0].y = tlPoint.y;
+
+	srcPoints[1].x = width -1;    dstPoints[1].x = trPoint.x;
+	srcPoints[1].y = 0;           dstPoints[1].y = trPoint.y;
+
+	srcPoints[2].x = 0;           dstPoints[2].x = blPoint.x;
+	srcPoints[2].y = height - 1;  dstPoints[2].y = blPoint.y;
+
+	srcPoints[3].x = width - 1;   dstPoints[3].x = brPoint.x;
+	srcPoints[3].y = height - 1;  dstPoints[3].y = brPoint.y;
+
+	Mat t = getPerspectiveTransform(srcPoints,dstPoints);
+	printf("transform matrix\n");  
+    for(int i =0;i<3;i++)  
+    {  
+        printf("% .4f ",t.at<double>(0,i));  
+        printf("% .4f ",t.at<double>(1,i));  
+        printf("% .4f \n",t.at<double>(2,i));  
+    }
+
+	for(int j = 0; j < height; j++)
+	{
+		for(int i = 0; i < width; i++)
+		{
+			Mat sample = (Mat_<double>(3,1)<<i,j,1);
+			Mat r = t*sample;
+			double s = r.at<double>(2,0);
+			int x = round(r.at<double>(0,0)/s);
+			int y = round(r.at<double>(1,0)/s);
+
+			for(int c = 0; c < nchannels; c++)
+			{
+				CV_IMAGE_ELEM(dst, unsigned char, j, nchannels*i + c) = CV_IMAGE_ELEM(src, unsigned char, y, nchannels*x+c);
+			}
+		}
+	}
+	return dst;
+}
+
 IplImage * cropImage(IplImage * src, int x, int y, int width, int height)
 {
 	cvSetImageROI(src, cvRect(x, y, width , height));
@@ -21,6 +78,9 @@ bool comparator( const mypair& l, const mypair& r)
 {
 	return l.first < r.first; 
 }
+
+// e.g.: data = {2, 5, 4, 1}
+// indices = {3, 0, 2, 1}
 vector<int> sort_indices(vector<int> data)
 {
 	vector<mypair> dataPair;
@@ -37,6 +97,26 @@ vector<int> sort_indices(vector<int> data)
 		indices.push_back(p.second);
 	}
 	return indices;
+}
+
+// e.g.: data = {2, 5, 4, 1}
+// orders = {1, 3, 2, 0}
+vector<int> get_orders(vector<int> data)
+{
+	vector<mypair> dataPair;
+	for(int i = 0; i < data.size(); i++)
+	{
+		mypair p(data[i], i);
+		dataPair.push_back(p);
+	}
+	sort(dataPair, comparator);
+	vector<int> orders(data.size());
+	for(int i = 0; i < data.size(); i++)
+	{
+		mypair p = dataPair[i];
+		orders[p.second] = i;
+	}
+	return orders;
 }
 
 // src is a mask image, 0 should be backgound , forground is non-zero points
@@ -158,6 +238,130 @@ CvRect getMaskBounding(IplImage * mask)
 	return rect;
 }
 
+CvRect getMaskBounding2(IplImage * mask, int maskval)
+{
+	CvRect rect;
+	if(!mask || mask->depth != IPL_DEPTH_8U || mask->nChannels != 1)
+	{
+		cerr<<"Error: getMaskBounding - mask should be non-empty, IPL_DEPTH_8U and 1 channel"<<endl;
+		return rect;
+	}
+
+	int width = mask->width;
+	int height = mask->height;
+	int min_i = width - 1, max_i = 0;
+	int min_j = height - 1, max_j = 0;
+	for(int j = 0; j < height; j++)
+	{
+		for(int i = 0; i < width; i++)
+		{
+			if(CV_IMAGE_ELEM(mask, unsigned char, j, i) == maskval)
+			{
+				min_i = (i < min_i) ? i : min_i;
+				max_i = (i > max_i) ? i : max_i;
+				min_j = (j < min_j) ? j : min_j;
+				max_j = (j > max_j) ? j : max_j;
+			}
+		}
+	}
+	rect.x = min_i;
+	rect.y = min_j;
+	rect.width = max_i - min_i + 1;
+	rect.height = max_j - min_j + 1;
+	return rect;
+}
+
+bool recogizeBoxNums(IplImage * box, int boxId)
+{
+	int swid = box->width/3;
+	int shei = swid;
+	for(int j = 0; j < 3; j++)
+	{
+		for(int i = 0; i < 3; i++)
+		{
+			IplImage * numImg = cropImage(box, i*swid, j*shei, swid, shei);
+#if DEBUG
+			ostringstream oss;
+			oss <<"box"<<boxId<<"."<<j<<"."<<i<<".png";
+			cvSaveImage(oss.str().c_str(), numImg);
+#endif
+			cvReleaseImage(&numImg);
+		}
+	}
+	return true;
+}
+bool splitNineBoxes(IplImage * src, IplImage * mask)
+{
+	if(!src || src->depth != IPL_DEPTH_8U || src->nChannels != 1)
+	{
+		cerr<<"Error: splitNineBoxes - src should be non-empty, IPL_DEPTH_8U and 1 channel"<<endl;
+		return 0;
+	}
+	if(!mask || mask->depth != IPL_DEPTH_8U || mask->nChannels != 1)
+	{
+		cerr<<"Error: splitNineBoxes - mask should be non-empty, IPL_DEPTH_8U and 1 channel"<<endl;
+		return 0;
+	}
+	if(mask->width != src->width || mask->height != src->height)
+	{
+		cerr<<"Error: splitNineBoxes - mask should be the same size of src"<<endl;
+	}
+	int width = src->width;
+	int height = src->height;
+	IplImage * drawImg = cvCreateImage(cvSize(width, height), IPL_DEPTH_8U, 3);
+	cvCvtColor(src , drawImg, CV_GRAY2BGR);
+	for(int n = 1; n <= 9; n++)
+	{
+		CvRect rect = getMaskBounding2(mask, n);
+		double mid_w = rect.x + rect.width/2.0;
+		double mid_h = rect.y + rect.height/2.0;
+		double max_tl_dist = 0;
+		double max_tr_dist = 0;
+		double max_bl_dist = 0;
+		double max_br_dist = 0;
+		int Mtlx, Mtly;
+		int Mtrx, Mtry;
+		int Mblx, Mbly;
+		int Mbrx, Mbry;
+
+		for(int h = 0; h < height; h++)
+		{
+			for(int w = 0; w < width; w++)
+			{
+				if(CV_IMAGE_ELEM(mask, unsigned char, h, w) == n)
+				{
+					double dist = (w-mid_w)*(w-mid_w) + (h-mid_h)*(h-mid_h);
+					if(w < mid_w && h < mid_h && dist > max_tl_dist) {Mtlx = w; Mtly = h; max_tl_dist = dist;}
+					if(w >= mid_w && h < mid_h && dist > max_tr_dist) {Mtrx = w; Mtry = h; max_tr_dist = dist;}
+					if(w < mid_w && h >= mid_h && dist > max_bl_dist) {Mblx = w; Mbly = h; max_bl_dist = dist;}
+					if(w >= mid_w && h >= mid_h && dist > max_br_dist) {Mbrx = w; Mbry = h; max_br_dist = dist;}
+				}
+			}
+		}
+		CvPoint tlPoint; tlPoint.x = Mtlx; tlPoint.y = Mtly;
+		CvPoint trPoint; trPoint.x = Mtrx; trPoint.y = Mtry;
+		CvPoint blPoint; blPoint.x = Mblx; blPoint.y = Mbly;
+		CvPoint brPoint; brPoint.x = Mbrx; brPoint.y = Mbry;
+		IplImage * box = cropImageToSquare3(src, tlPoint, trPoint, blPoint, brPoint);
+#if DEBUG
+		ostringstream oss;
+		oss<<"box"<<n<<".png";
+		cvSaveImage(oss.str().c_str(), box);
+#endif
+		recogizeBoxNums(box, n);
+		cvReleaseImage(&box);
+
+		cvCircle(drawImg, tlPoint, 2, CV_RGB(0xff, 0x0, 0x0), 2, CV_AA, 0);
+		cvCircle(drawImg, trPoint, 2, CV_RGB(0x0, 0xff, 0x0), 2, CV_AA, 0);
+		cvCircle(drawImg, blPoint, 2, CV_RGB(0x0, 0x0, 0xff), 2, CV_AA, 0);
+		cvCircle(drawImg, brPoint, 2, CV_RGB(0xff, 0xff, 0xff), 2, CV_AA, 0);
+	}
+#if DEBUG
+	cvSaveImage("test2.bin2.png", drawImg);
+	cvReleaseImage(&drawImg);
+#endif
+	return true;
+}
 // src is grayscale image
 bool findNineBoxes(IplImage * src, IplImage * mask)
 {
@@ -258,18 +462,14 @@ bool findNineBoxes(IplImage * src, IplImage * mask)
 			}
 		}
 	}
-	//vector<int> colorsum_orders = sort_indices(colorsum);
-	vector<int> colorsum_sorted = colorsum;
-	sort(colorsum_sorted.begin(), colorsum_sorted.end());
-	int min_num = colorsum_sorted[colorNum - 9];
+	vector<int> colorsum_orders = get_orders(colorsum);
 
 	cout<<"Areas: "<<endl;
 	for(int i = 0; i < colorNum; i++)
 	{
-		cout<<colorsum_sorted[i]<<" ";
+		cout<<colorsum[i]<<" ";
 	}
 	cout<<endl;
-	cout<<"min_num = "<<min_num<<endl;
 
 	IplImage * indexImage = cvCreateImage(cvSize(width, height), IPL_DEPTH_8U, 3);
 	for(int h = 0; h < height; h++)
@@ -280,7 +480,8 @@ bool findNineBoxes(IplImage * src, IplImage * mask)
 			int g = CV_IMAGE_ELEM(binImg, unsigned char, h, 3*w+1);
 			int r = CV_IMAGE_ELEM(binImg, unsigned char, h, 3*w+2);
 			int val = r*256*256 + g*256 + b;
-			if(val > 0 && colorsum[val] >= min_num)
+			int order = colorNum - 1 - colorsum_orders[val];
+			if(val > 0 && order < 9)
 			{
 				int rr = val * 89 % 256;
 				int gg = val * 191 % 256;
@@ -288,18 +489,22 @@ bool findNineBoxes(IplImage * src, IplImage * mask)
 				CV_IMAGE_ELEM(indexImage, unsigned char, h, 3*w) = rr;  
 				CV_IMAGE_ELEM(indexImage, unsigned char, h, 3*w+1) = gg;  
 				CV_IMAGE_ELEM(indexImage, unsigned char, h, 3*w+2) = bb;  
+				CV_IMAGE_ELEM(mask2, unsigned char, h, w) = order+1;
 			}
 			else
 			{  
 				CV_IMAGE_ELEM(indexImage, unsigned char, h, 3*w) = 0;  
 				CV_IMAGE_ELEM(indexImage, unsigned char, h, 3*w+1) = 0;  
-				CV_IMAGE_ELEM(indexImage, unsigned char, h, 3*w+2) = 0;  
+				CV_IMAGE_ELEM(indexImage, unsigned char, h, 3*w+2) = 0;
+
+				CV_IMAGE_ELEM(mask2, unsigned char, h, w) = 0;
 			}
 		}
 	}
 #if DEBUG
 	cvSaveImage("test2.bin1.png", indexImage);
 #endif
+	splitNineBoxes(src2, mask2);
 	cvReleaseImage(&src2);
 	cvReleaseImage(&mask2);
 	cvReleaseImage(&binImg);
