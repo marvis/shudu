@@ -2,10 +2,14 @@
 #include <opencv/highgui.h>
 #include <iostream>
 #include <string>
+#include <fstream>
+#include "sudoku.h"
 
 using namespace std;
 using namespace cv;
 #define DEBUG 1
+
+string filename0, filename1;
 
 // the image width is 3*n
 IplImage * cropImageToSquare3(IplImage * src, CvPoint tlPoint, CvPoint trPoint, CvPoint blPoint, CvPoint brPoint)
@@ -14,10 +18,10 @@ IplImage * cropImageToSquare3(IplImage * src, CvPoint tlPoint, CvPoint trPoint, 
 	double dy1 =  (trPoint.y + brPoint.y)/2.0 - (tlPoint.y + blPoint.y)/2.0;
 	double dx2 = (tlPoint.x + trPoint.x)/2.0 - (blPoint.x + brPoint.x)/2.0;
 	double dy2 = (tlPoint.y + trPoint.y)/2.0 - (blPoint.y + brPoint.y)/2.0;
-	int width = sqrt(dx1*dx1 + dy1*dy1) + 0.5;
-	int height = sqrt(dx2*dx2 + dy2*dy2) + 0.5;
-	width = (width + height)/2.0;
-	width = width - width % 3;
+	int width = 300;//sqrt(dx1*dx1 + dy1*dy1) + 0.5;
+	int height = 300;//sqrt(dx2*dx2 + dy2*dy2) + 0.5;
+	//width = (width + height)/2.0;
+	//width = width - width % 3;
 	height = width;
 	IplImage * dst = cvCreateImage(cvSize(width, height), IPL_DEPTH_8U, src->nChannels);
 	int nchannels = src->nChannels;
@@ -37,13 +41,13 @@ IplImage * cropImageToSquare3(IplImage * src, CvPoint tlPoint, CvPoint trPoint, 
 	srcPoints[3].y = height - 1;  dstPoints[3].y = brPoint.y;
 
 	Mat t = getPerspectiveTransform(srcPoints,dstPoints);
-	printf("transform matrix\n");  
+	/*printf("transform matrix\n");  
     for(int i =0;i<3;i++)  
     {  
         printf("% .4f ",t.at<double>(0,i));  
         printf("% .4f ",t.at<double>(1,i));  
         printf("% .4f \n",t.at<double>(2,i));  
-    }
+    }*/
 
 	for(int j = 0; j < height; j++)
 	{
@@ -271,10 +275,31 @@ CvRect getMaskBounding2(IplImage * mask, int maskval)
 	return rect;
 }
 
-bool recogizeBoxNums(IplImage * box, int boxId)
+int whichNum(string file)
+{
+	string featfile = file + ".feat.txt";
+	string featfile_scale = file + ".feat.scale.txt";
+	string outfile = file + ".out.txt";
+	string cmd1 = "classes/hogfeat " + file + " 1 > " + featfile;
+	string cmd2 = "svm-scale -r classes/rules " + featfile + " > " + featfile_scale;
+	string cmd3 = "svm-predict " + featfile_scale + " classes/trainfile_scale.model " + outfile + " > /dev/null";
+	string allcmds = cmd1 + " && " + cmd2 + " && " + cmd3;
+	system(allcmds.c_str());
+	ifstream ifs;
+	ifs.open(outfile);
+	int c;
+	ifs >> c;
+	ifs.close();
+
+	return c;
+}
+
+// boxId is used in the filename
+vector<int> recogizeBoxNums(IplImage * box, int boxId)
 {
 	int swid = box->width/3;
 	int shei = swid;
+	vector<int> nums;
 	for(int j = 0; j < 3; j++)
 	{
 		for(int i = 0; i < 3; i++)
@@ -282,15 +307,18 @@ bool recogizeBoxNums(IplImage * box, int boxId)
 			IplImage * numImg = cropImage(box, i*swid, j*shei, swid, shei);
 #if DEBUG
 			ostringstream oss;
-			oss <<"box"<<boxId<<"."<<j<<"."<<i<<".png";
+			oss <<filename0<<".box"<<boxId<<"."<<j<<"."<<i<<".png";
 			cvSaveImage(oss.str().c_str(), numImg);
 #endif
+			
+			int c = whichNum(oss.str());
+			nums.push_back(c);
 			cvReleaseImage(&numImg);
 		}
 	}
-	return true;
+	return nums;
 }
-bool splitNineBoxes(IplImage * src, IplImage * mask)
+bool splitNineBoxes(IplImage * src, IplImage * mask, int (&matrix)[9][9])
 {
 	if(!src || src->depth != IPL_DEPTH_8U || src->nChannels != 1)
 	{
@@ -310,6 +338,8 @@ bool splitNineBoxes(IplImage * src, IplImage * mask)
 	int height = src->height;
 	IplImage * drawImg = cvCreateImage(cvSize(width, height), IPL_DEPTH_8U, 3);
 	cvCvtColor(src , drawImg, CV_GRAY2BGR);
+	vector<int> Mtlxs, Mtlys;
+	vector<vector<int> > allnums;
 	for(int n = 1; n <= 9; n++)
 	{
 		CvRect rect = getMaskBounding2(mask, n);
@@ -338,6 +368,8 @@ bool splitNineBoxes(IplImage * src, IplImage * mask)
 				}
 			}
 		}
+		Mtlxs.push_back(Mtlx); Mtlys.push_back(Mtly);
+
 		CvPoint tlPoint; tlPoint.x = Mtlx; tlPoint.y = Mtly;
 		CvPoint trPoint; trPoint.x = Mtrx; trPoint.y = Mtry;
 		CvPoint blPoint; blPoint.x = Mblx; blPoint.y = Mbly;
@@ -346,15 +378,33 @@ bool splitNineBoxes(IplImage * src, IplImage * mask)
 #if DEBUG
 		ostringstream oss;
 		oss<<"box"<<n<<".png";
-		cvSaveImage(oss.str().c_str(), box);
+		//cvSaveImage(oss.str().c_str(), box);
 #endif
-		recogizeBoxNums(box, n);
+		vector<int> boxnums = recogizeBoxNums(box, n);
+		allnums.push_back(boxnums);
 		cvReleaseImage(&box);
 
 		cvCircle(drawImg, tlPoint, 2, CV_RGB(0xff, 0x0, 0x0), 2, CV_AA, 0);
 		cvCircle(drawImg, trPoint, 2, CV_RGB(0x0, 0xff, 0x0), 2, CV_AA, 0);
 		cvCircle(drawImg, blPoint, 2, CV_RGB(0x0, 0x0, 0xff), 2, CV_AA, 0);
 		cvCircle(drawImg, brPoint, 2, CV_RGB(0xff, 0xff, 0xff), 2, CV_AA, 0);
+	}
+	vector<int> xorders = get_orders(Mtlxs);
+	vector<int> yorders = get_orders(Mtlys);
+
+	for(int n = 0; n < 9; n++)
+	{
+		int i = xorders[n]/3;
+		int j = yorders[n]/3;
+		for(int jj = 0; jj < 3; jj++)
+		{
+			for(int ii = 0; ii < 3; ii++)
+			{
+				int I = i * 3 + ii;
+				int J = j * 3 + jj;
+				matrix[J][I] = allnums[n][jj*3+ii];
+			}
+		}
 	}
 #if DEBUG
 	cvSaveImage("test2.bin2.png", drawImg);
@@ -363,7 +413,7 @@ bool splitNineBoxes(IplImage * src, IplImage * mask)
 	return true;
 }
 // src is grayscale image
-bool findNineBoxes(IplImage * src, IplImage * mask)
+bool findNineBoxes(IplImage * src, IplImage * mask, int (&matrix)[9][9])
 {
 	if(!src || src->depth != IPL_DEPTH_8U || src->nChannels != 1)
 	{
@@ -392,7 +442,7 @@ bool findNineBoxes(IplImage * src, IplImage * mask)
 		{
 			double val = CV_IMAGE_ELEM(src2, unsigned char, j, i);
 			double maskval = CV_IMAGE_ELEM(mask2, unsigned char, j, i);
-			if(maskval > 0 && val > 60) 
+			if(maskval > 0 && val > 80) 
 			{
 				CV_IMAGE_ELEM(binImg, unsigned char, j, 3*i) = 255;
 				CV_IMAGE_ELEM(binImg, unsigned char, j, 3*i+1) = 255;
@@ -464,12 +514,13 @@ bool findNineBoxes(IplImage * src, IplImage * mask)
 	}
 	vector<int> colorsum_orders = get_orders(colorsum);
 
-	cout<<"Areas: "<<endl;
+	/*cout<<"Areas: "<<endl;
 	for(int i = 0; i < colorNum; i++)
 	{
 		cout<<colorsum[i]<<" ";
 	}
 	cout<<endl;
+	*/
 
 	IplImage * indexImage = cvCreateImage(cvSize(width, height), IPL_DEPTH_8U, 3);
 	for(int h = 0; h < height; h++)
@@ -504,7 +555,7 @@ bool findNineBoxes(IplImage * src, IplImage * mask)
 #if DEBUG
 	cvSaveImage("test2.bin1.png", indexImage);
 #endif
-	splitNineBoxes(src2, mask2);
+	splitNineBoxes(src2, mask2, matrix);
 	cvReleaseImage(&src2);
 	cvReleaseImage(&mask2);
 	cvReleaseImage(&binImg);
@@ -525,7 +576,7 @@ bool xiaomiScreen(IplImage * src, IplImage * dst)
 	int height = src->height;
 // find maximum component first time
 	IplImage * smthImg = cvCreateImage(cvSize(width, height), IPL_DEPTH_8U, 1);
-	cvSmooth(src, smthImg, CV_BLUR, 5, 5);
+	cvSmooth(src, smthImg, CV_BLUR, 7, 7);
 	IplImage * binImg = cvCreateImage(cvSize(width, height), IPL_DEPTH_8U, 3);
 	for(int j = 0; j < height; j++)
 	{
@@ -897,8 +948,8 @@ int main(int argc, char ** argv)
 	}
 	IplImage * image0 = cvLoadImage(argv[1], 0); // load as gray image
 	IplImage * image1 = cvLoadImage(argv[1], 1); // load as color image
-	string filename0 = argv[1];
-	string filename1 = filename0;
+	filename0 = argv[1];
+	filename1 = filename0;
 	if(!image0 || !image1)
 	{
 		printf( "No image data \n" );
@@ -950,7 +1001,27 @@ int main(int argc, char ** argv)
 	filename1 = filename0 + ".boundary2.png";
 	cvSaveImage(filename1.c_str(), image1);
 
-	findNineBoxes(image0, mask0);
+	int matrix[9][9];
+	findNineBoxes(image0, mask0, matrix);
+	for(int j = 0; j < 9; j++)
+	{
+		for(int i = 0; i < 9; i++)
+		{
+			cout<<matrix[j][i]<<" ";
+		}
+		cout<<endl;
+	}
+
+	cout<<endl;
+	cout<<"=========== Solution ============"<<endl;
+	if(sudoku(matrix))
+	{
+		print_matrix(matrix);
+	}
+	else
+	{
+		cout<<"Failed!"<<endl;
+	}
 
 	cvReleaseImage(&image0);
 	cvReleaseImage(&image1);
