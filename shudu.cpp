@@ -4,12 +4,52 @@
 #include <string>
 #include <fstream>
 #include "sudoku.h"
+#include "classes/feature.h"
+#include "svm.h"
 
 using namespace std;
 using namespace cv;
 #define DEBUG 1
 
 string filename0, filename1;
+string modelfile = "classes/trainfile_scale.model";
+string rulefile = "classes/rules";
+struct svm_model* model = 0;
+vector<pair<double, double> > scale_params;
+bool load_svm_rules(string rulefile)
+{
+	assert(scale_params.empty());
+	ifstream ifs;
+	ifs.open(rulefile.c_str());
+	char name[256];
+	ifs.getline(name, 256);
+	ifs.getline(name, 256);
+	int id;
+	double min_val, max_val;
+	while(ifs.good())
+	{
+		ifs >> id;
+		ifs >> min_val;
+		ifs >> max_val;
+		scale_params.push_back(pair<double,double>(min_val, max_val));
+	}
+	ifs.close();
+	return true;
+}
+
+void scale_svm_node(struct svm_node * x, vector<pair<double, double> > &scale_params, double scale_min_val, double scale_max_val)
+{
+	int nFeat = scale_params.size();
+	for(int i = 0; i < nFeat; i++)
+	{
+		double min_val = scale_params[i].first;
+		double max_val = scale_params[i].second;
+		//x[i].index = i+1;
+		x[i].value = (x[i].value - min_val)/(max_val - min_val) * 2.0 - 1.0;
+		//cout<<" "<<x[i].index<<":"<<x[i].value;
+	}
+	//cout<<endl;
+}
 
 // the image width is 3*n
 IplImage * cropImageToSquare3(IplImage * src, CvPoint tlPoint, CvPoint trPoint, CvPoint blPoint, CvPoint brPoint)
@@ -275,7 +315,7 @@ CvRect getMaskBounding2(IplImage * mask, int maskval)
 	return rect;
 }
 
-int whichNum(string file)
+int whichNum1(string file)
 {
 	string featfile = file + ".feat.txt";
 	string featfile_scale = file + ".feat.scale.txt";
@@ -294,6 +334,55 @@ int whichNum(string file)
 	return c;
 }
 
+int whichNum2(IplImage * __image)
+{
+	IplImage * _image = cvCreateImage(cvGetSize(__image), IPL_DEPTH_8U, 3);//cvLoadImage("classes/test/1/7.png.box1.1.1.png",1);
+	cvCvtColor(__image, _image, CV_GRAY2BGR);
+	IplImage * image = cropImage(_image, 2, 2, _image->width - 4, _image->height-4);
+	FeatureMap ** map = new (FeatureMap*);
+	getFeature(image, 8, map);
+	normalizehog(*map, 0.2);
+	PCAFeature(*map);
+
+	int nFeat = (*map)->numFeatures * (*map)->sizeX * (*map)->sizeY;
+	float * feats = (*map)->map;
+	struct svm_node * x = (struct svm_node*) malloc((nFeat+1) * sizeof(struct svm_node));
+	for(int i = 0; i < nFeat; i++)
+	{
+		x[i].index = i+1;
+		x[i].value = feats[i];
+	}
+	x[nFeat].index = -1;
+	scale_svm_node(x, scale_params, -1.0, 1.0);
+	double predict_label = svm_predict(model, x);
+	delete map;
+	delete [] (*map);
+	cvReleaseImage(&image);
+	cvReleaseImage(&_image);
+	return (int)(predict_label);
+}
+
+bool isBackground(IplImage * numImg)
+{
+	// 去除边框的影响
+	IplImage * tmpImg = cropImage(numImg, 15, 15, 70, 70);
+	int width = tmpImg->width;
+	int height = tmpImg->height;
+	int count =  0;
+	for(int j = 0; j < height; j++)
+	{
+		for(int i = 0; i < width; i++)
+		{
+			if(CV_IMAGE_ELEM(tmpImg, unsigned char, j, i) < 80)
+			{
+				count++;
+			}
+		}
+	}
+	cvReleaseImage(&tmpImg);
+	if(count == 0) return true;
+	else return false;
+}
 // boxId is used in the filename
 vector<int> recogizeBoxNums(IplImage * box, int boxId)
 {
@@ -310,9 +399,18 @@ vector<int> recogizeBoxNums(IplImage * box, int boxId)
 			oss <<filename0<<".box"<<boxId<<"."<<j<<"."<<i<<".png";
 			cvSaveImage(oss.str().c_str(), numImg);
 #endif
-			
-			int c = whichNum(oss.str());
-			nums.push_back(c);
+			if(isBackground(numImg))
+				nums.push_back(0);
+			else
+			{
+				//int c1 = whichNum1(oss.str());
+				int c2 = whichNum2(numImg);
+				//if(c1 != c2)
+				//{
+				//	cerr<<"c1 = "<<c1<<" c2 = "<<c2<<endl;
+				//}
+				nums.push_back(c2);
+			}
 			cvReleaseImage(&numImg);
 		}
 	}
@@ -342,6 +440,7 @@ bool splitNineBoxes(IplImage * src, IplImage * mask, int (&matrix)[9][9])
 	vector<vector<int> > allnums;
 	for(int n = 1; n <= 9; n++)
 	{
+		cout<<"n = "<<n<<endl;
 		CvRect rect = getMaskBounding2(mask, n);
 		double mid_w = rect.x + rect.width/2.0;
 		double mid_h = rect.y + rect.height/2.0;
@@ -946,6 +1045,16 @@ int main(int argc, char ** argv)
 		printf("No input image\n");
 		return -1;
 	}
+	if((model = svm_load_model(modelfile.c_str())) == 0)
+	{
+		cerr<<"Can't open model file "<<modelfile<<endl;
+		return 0;
+	}
+	if(!load_svm_rules(rulefile.c_str()))
+	{
+		cerr<<"Can't load svm rule file"<<rulefile<<endl;
+		return 0;
+	}
 	IplImage * image0 = cvLoadImage(argv[1], 0); // load as gray image
 	IplImage * image1 = cvLoadImage(argv[1], 1); // load as color image
 	filename0 = argv[1];
@@ -957,11 +1066,11 @@ int main(int argc, char ** argv)
 	}
 
 	IplImage * mask0 = cvCreateImage(cvGetSize(image0), IPL_DEPTH_8U, 1);
-	IplImage * mask1 = cvCreateImage(cvGetSize(image0), IPL_DEPTH_8U, 3);
 	//maximumConnectedComponent(image0, mask0, 40, 255, CV_THRESH_BINARY);
 	xiaomiScreen(image0, mask0);
+/*
+	IplImage * mask1 = cvCreateImage(cvGetSize(image0), IPL_DEPTH_8U, 3);
 	cvCvtColor(mask0, mask1, CV_GRAY2BGR);
-
 	vector<CvPoint> leftPoints, rightPoints, topPoints, bottomPoints;
 	boundaryPoints(mask0, leftPoints, rightPoints, topPoints, bottomPoints);
 	for(int i = 0; i < leftPoints.size(); i++)
@@ -1000,7 +1109,7 @@ int main(int argc, char ** argv)
 
 	filename1 = filename0 + ".boundary2.png";
 	cvSaveImage(filename1.c_str(), image1);
-
+*/
 	int matrix[9][9];
 	findNineBoxes(image0, mask0, matrix);
 	for(int j = 0; j < 9; j++)
@@ -1026,6 +1135,9 @@ int main(int argc, char ** argv)
 	cvReleaseImage(&image0);
 	cvReleaseImage(&image1);
 	cvReleaseImage(&mask0);
-	cvReleaseImage(&mask1);
+	//cvReleaseImage(&mask1);
+	svm_free_model_content(model);
+	svm_free_and_destroy_model(&model);
+	//svm_destroy_model(&model);
 	return 0;
 }
